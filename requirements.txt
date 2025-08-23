@@ -1,0 +1,22 @@
+# Database
+psycopg2-binary>=2.9
+
+# HTTP requests
+aiohttp>=3.8.0
+requests==2.31.0
+urllib3==1.26.18
+
+# Environment variables
+python-dotenv>=1.0
+
+# Date/time handling
+python-dateutil>=2.8
+
+# Logging
+colorlog>=6.7
+
+# Google Trends API (using direct API calls)
+# pytrends==4.9.2  # Removed due to compatibility issues
+
+# Wikipedia API
+wikipedia-api>=0.6.0
