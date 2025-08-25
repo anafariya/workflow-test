@@ -27,7 +27,7 @@ def handler(request, context):
                 'success': True,
                 'message': 'Trending keywords job completed',
                 'result': result,
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.now().isoformat()
             }),
             'headers': {
                 'Content-Type': 'application/json'
@@ -39,7 +39,7 @@ def handler(request, context):
             'body': json.dumps({
                 'success': False,
                 'error': str(e),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.now().isoformat()
             }),
             'headers': {
                 'Content-Type': 'application/json'

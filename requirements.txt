@@ -12,6 +12,9 @@ python-dotenv>=1.0
 # Date/time handling
 python-dateutil>=2.8
 
+# Dataframes
+pandas>=2.0
+
 # Logging
 colorlog>=6.7
 
@@ -20,3 +23,7 @@ colorlog>=6.7
 
 # Wikipedia API
 wikipedia-api>=0.6.0
+
+
+# Trends client (pin to latest available)
+trendspy==0.1.6
