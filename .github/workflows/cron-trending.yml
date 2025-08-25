@@ -23,9 +23,7 @@ jobs:
 
       # Recommended
       ENVIRONMENT: production
-      TRENDS_GEOS: ${{ secrets.TRENDS_GEOS }}          # e.g. "US,GB,CA,AU"
-      MAX_KEYWORDS: ${{ secrets.MAX_KEYWORDS || 50 }}  # optional override
-      TIME_BUDGET_SECONDS: ${{ secrets.TIME_BUDGET_SECONDS || 25 }}
+      # Optional inputs are set with safe defaults in the run step
 
       # Python improves logging flush
       PYTHONUNBUFFERED: "1"
@@ -40,21 +38,25 @@ jobs:
           python-version: "3.11"
           cache: "pip"
           cache-dependency-path: |
-            cron-job/requirements.txt
+            requirements.txt
 
       - name: Install dependencies
         run: |
           python -V
           pip install --upgrade pip
-          pip install -r cron-job/requirements.txt
+          pip install -r requirements.txt
 
       - name: Run daily ingestion (with basic retry)
         run: |
           set -e
+          # Safe defaults if secrets not provided
+          export TRENDS_GEOS=${TRENDS_GEOS:-US,GB,CA,AU}
+          export MAX_KEYWORDS=${MAX_KEYWORDS:-50}
+          export TIME_BUDGET_SECONDS=${TIME_BUDGET_SECONDS:-25}
           ATTEMPTS=3
           for i in $(seq 1 $ATTEMPTS); do
             echo "Attempt $i of $ATTEMPTS"
-            if python cron-job/trending.py; then
+            if python trending.py; then
               echo "Job succeeded"
               exit 0
             fi
