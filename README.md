@@ -153,6 +153,9 @@ The cron job is deployed using GitHub Actions scheduled workflows.
    - Navigate to **Settings** → **Secrets and variables** → **Actions**
    - Add the following secrets:
      - `DATABASE_URL`: Your PostgreSQL connection string
+
+
+     **OPTIONAL:**
      - `WIKIMEDIA_USER_AGENT`: (Optional) Your user agent
      - `WIKIMEDIA_REFERER`: (Optional) Your referer
 
