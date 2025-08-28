@@ -1,7 +1,7 @@
 {
   "functions": {
     "api/cron/trending.py": {
-      "runtime": "python3.11"
+      "runtime": "@vercel/python@3.0.0"
     }
   },
   "crons": [
@@ -9,5 +9,6 @@
       "path": "/api/cron/trending",
       "schedule": "0 0 * * *"
     }
-  ]
+  ],
+  "buildCommand": null
 }

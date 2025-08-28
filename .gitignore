@@ -185,3 +185,4 @@ settings.local.py
 
 # Vercel
 .vercel/
+.vercel
