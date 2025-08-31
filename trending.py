@@ -59,25 +59,48 @@ class TrendingDataFetcher:
             self.logger.error(f"❌ Database connection failed: {e}")
             return False
     
-    async def fetch_all_trending_data(self) -> List[str]:
-        """Fetch trending data using trendspy as primary and fallbacks"""
-        keywords = []
+    async def fetch_all_trending_data(self) -> Dict[str, List[str]]:
+        """Fetch trending data from both TrendsPy and Wikimedia sources"""
+        results = {
+            'trendspy': [],
+            'wikimedia': []
+        }
+        
+        # Fetch from both sources in parallel for efficiency
+        tasks = []
         
         if TRENDSPY_AVAILABLE:
-            keywords.extend(await self._fetch_trendspy_data())
+            tasks.append(('trendspy', self._fetch_trendspy_data()))
         
-        # Remove duplicates and limit
-        unique_keywords = list(dict.fromkeys(keywords))
-        self.logger.info(f"📊 Total unique keywords collected: {len(unique_keywords)}")
-        return unique_keywords[:50]
+        tasks.append(('wikimedia', self._fetch_wikimedia_trending_data()))
+        
+        # Execute both fetches concurrently
+        for source, task in tasks:
+            try:
+                keywords = await task
+                results[source] = list(dict.fromkeys(keywords))[:50]  # Remove duplicates, limit to 50
+                self.logger.info(f"📊 {source.title()}: collected {len(results[source])} unique keywords")
+            except Exception as e:
+                self.logger.error(f"❌ {source.title()} fetch failed: {e}")
+                results[source] = []
+        
+        total = sum(len(kws) for kws in results.values())
+        self.logger.info(f"📊 Total keywords from all sources: {total}")
+        
+        return results
 
-    async def _build_records(self, keywords: List[str]) -> List[Dict[str, Any]]:
+    async def _build_records(self, keywords: List[str], source: str = 'trendspy') -> List[Dict[str, Any]]:
         """Build DB records with improved data quality handling - NOW ASYNC"""
         records: List[Dict[str, Any]] = []
         run_date = datetime.now(timezone.utc).date().isoformat()
         
-        for kw in keywords:
+        for i, kw in enumerate(keywords):
             try:
+                # Reconnect to database every 10 keywords to prevent timeout
+                if i > 0 and i % 10 == 0:
+                    self.logger.info(f"🔄 Refreshing database connection ({i}/{len(keywords)} processed)...")
+                    self.connect_database()
+                
                 # Get pageview data with better error handling - NOW AWAITED
                 pv = await self.get_wikimedia_pageviews_improved(kw)
                 
@@ -122,9 +145,14 @@ class TrendingDataFetcher:
                     "category": category,
                     "difficulty": difficulty,
                     "cpc": cpc,
+                    "source": source,  # Add source field
                     "sources": sources
                 }
                 records.append(record)
+                
+                # Progress logging every 5 keywords
+                if (i + 1) % 5 == 0 or (i + 1) == len(keywords):
+                    self.logger.info(f"📝 Built {i + 1}/{len(keywords)} {source} records...")
                 
             except Exception as e:
                 self.logger.warning(f"⚠️ Failed to build record for '{kw}': {e}")
@@ -355,8 +383,8 @@ class TrendingDataFetcher:
                     cursor.execute(
                         """
                         INSERT INTO trendingkeyword
-                        (keyword, search_volume, trend, change_percent, category, difficulty, cpc, sources, created_at, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                        (keyword, search_volume, trend, change_percent, category, difficulty, cpc, source, sources, created_at, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                         ON CONFLICT (keyword)
                         DO UPDATE SET
                         search_volume = EXCLUDED.search_volume,
@@ -365,12 +393,13 @@ class TrendingDataFetcher:
                         category = EXCLUDED.category,
                         difficulty = EXCLUDED.difficulty,
                         cpc = EXCLUDED.cpc,
+                        source = EXCLUDED.source,
                         sources = EXCLUDED.sources,
                         updated_at = NOW()
                         """,
                         (
                             r["keyword"], r["search_volume"], r["trend"], r["change_percent"],
-                            r["category"], r["difficulty"], r["cpc"], json.dumps(r["sources"])
+                            r["category"], r["difficulty"], r["cpc"], r["source"], json.dumps(r["sources"])
                         )
                     )
                     
@@ -395,6 +424,7 @@ class TrendingDataFetcher:
             
             # Commit transaction
             try:
+                self.logger.info(f"🔄 Committing transaction with {processed} processed records...")
                 self.db_connection.commit()
                 self.logger.info("✅ Transaction committed successfully")
             except Exception as e:
@@ -502,21 +532,97 @@ class TrendingDataFetcher:
         
         return keywords
     
+    async def _fetch_wikimedia_trending_data(self) -> List[str]:
+        """Fetch trending Wikipedia articles as keywords"""
+        keywords = []
+        
+        try:
+            # Get yesterday's date for most recent complete data
+            from datetime import datetime, timedelta
+            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y/%m/%d')
+            
+            # Wikipedia language editions for different regions (same as TrendsPy)
+            wikis = {
+                'en.wikipedia': 'US/GB',  # English Wikipedia
+                'de.wikipedia': 'DE',     # German Wikipedia  
+                'fr.wikipedia': 'FR/CA',  # French Wikipedia
+            }
+            
+            max_total = int(os.getenv('MAX_KEYWORDS', '50'))
+            keywords_per_wiki = max_total // len(wikis) + 10  # Buffer for deduplication
+            
+            self.logger.info("🔄 Fetching Wikipedia trending articles...")
+            
+            for wiki, region in wikis.items():
+                try:
+                    await asyncio.sleep(1)  # Rate limiting
+                    self.logger.info(f"🌍 Fetching trending articles for {wiki} ({region})...")
+                    
+                    # Wikipedia Pageviews API - most viewed articles
+                    url = f"https://wikimedia.org/api/rest_v1/metrics/pageviews/top/{wiki}.org/all-access/{yesterday}"
+                    
+                    response = requests.get(
+                        url,
+                        timeout=15,
+                        headers={
+                            'User-Agent': os.getenv('WIKIMEDIA_USER_AGENT', 'KeywordTrendsCronJob/1.0'),
+                            'Referer': os.getenv('WIKIMEDIA_REFERER', 'https://github.com/yourusername/your-repo')
+                        }
+                    )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        articles = data.get('items', [{}])[0].get('articles', [])
+                        
+                        wiki_keywords = []
+                        for article in articles[:keywords_per_wiki]:
+                            title = article.get('article', '').replace('_', ' ')
+                            
+                            # Filter out Wikipedia meta pages and very short titles
+                            if (title and len(title) > 3 and 
+                                not title.startswith(('File:', 'Category:', 'Template:', 'Wikipedia:', 'User:', 'Talk:')) and
+                                title not in ['Main_Page', 'Special:Search']):
+                                wiki_keywords.append(title)
+                        
+                        keywords.extend(wiki_keywords[:keywords_per_wiki])
+                        self.logger.info(f"✅ Collected {len(wiki_keywords)} trending articles from {wiki} (total: {len(keywords)})")
+                        
+                        if len(keywords) >= max_total:
+                            break
+                            
+                    else:
+                        self.logger.warning(f"⚠️ Wikipedia API returned {response.status_code} for {wiki}")
+                        
+                except Exception as e:
+                    self.logger.warning(f"⚠️ Error fetching from {wiki}: {e}")
+                    continue
+            
+            # Remove duplicates and limit
+            unique_keywords = list(dict.fromkeys(keywords))[:max_total]
+            self.logger.info(f"📊 Wikipedia trending: collected {len(unique_keywords)} unique articles")
+            
+            return unique_keywords
+            
+        except Exception as e:
+            self.logger.error(f"❌ Wikimedia trending fetch failed: {e}")
+            return []
+    
     async def run(self) -> Dict[str, Any]:
         """Main run method with comprehensive logging"""
         try:
             self.logger.info("🚀 Starting trending data fetch job...")
             start_time = time.time()
             
-            # Fetch keywords
+            # Fetch keywords from both sources
             self.logger.info("📡 Fetching trending data...")
-            keywords = await self.fetch_all_trending_data()
+            keyword_sources = await self.fetch_all_trending_data()
             
-            if not keywords:
-                self.logger.warning("⚠️ No keywords fetched!")
+            total_keywords = sum(len(kws) for kws in keyword_sources.values())
+            if total_keywords == 0:
+                self.logger.warning("⚠️ No keywords fetched from any source!")
                 return {
                     'success': False,
-                    'error': 'No keywords fetched',
+                    'error': 'No keywords fetched from any source',
                     'keywords_count': 0,
                     'timestamp': datetime.now().isoformat()
                 }
@@ -524,34 +630,61 @@ class TrendingDataFetcher:
             end_time = time.time()
             fetch_time = round(end_time - start_time, 2)
             
-            self.logger.info(f"✅ Fetched {len(keywords)} keywords in {fetch_time}s")
+            # Collect sample keywords for response
+            all_keywords_sample = []
+            for source, keywords in keyword_sources.items():
+                all_keywords_sample.extend(keywords[:5])  # First 5 from each source
+            
+            self.logger.info(f"✅ Fetched {total_keywords} keywords in {fetch_time}s")
             
             # Store in database if configured
-            db_result = None
+            db_results = {}
             if os.getenv('DATABASE_URL'):
                 self.logger.info("🗄️ DATABASE_URL detected, connecting to database...")
                 if self.connect_database():
-                    self.logger.info("🔧 Building records for database storage...")
-                    records = await self._build_records(keywords)  # NOW AWAITED
-                    
-                    if records:
-                        self.logger.info(f"💾 Storing {len(records)} records in database...")
-                        db_result = await self.store_keywords_in_database(records)  # NOW AWAITED
-                    else:
-                        self.logger.warning("⚠️ No valid records to store")
-                        db_result = {"success": False, "error": "No valid records"}
+                    # Process each source separately
+                    for source, keywords in keyword_sources.items():
+                        if not keywords:
+                            self.logger.info(f"ℹ️ No keywords from {source}, skipping...")
+                            db_results[source] = {"success": True, "processed_count": 0}
+                            continue
+                        
+                        self.logger.info(f"🔧 Building records for {source} ({len(keywords)} keywords)...")
+                        records = await self._build_records(keywords, source=source)
+                        
+                        if records:
+                            # Reconnect to database in case connection timed out during record building
+                            self.logger.info("🔄 Reconnecting to database before storage...")
+                            if not self.connect_database():
+                                self.logger.error("❌ Database reconnection failed")
+                                db_results[source] = {"success": False, "error": "Database reconnection failed"}
+                            else:
+                                self.logger.info(f"💾 Storing {len(records)} {source} records in database...")
+                                db_results[source] = await self.store_keywords_in_database(records)
+                        else:
+                            self.logger.warning(f"⚠️ No valid {source} records to store")
+                            db_results[source] = {"success": False, "error": "No valid records"}
+                            
+                    # Combine results
+                    db_result = {
+                        "success": all(r.get("success", False) for r in db_results.values()),
+                        "sources": db_results,
+                        "total_processed": sum(r.get("processed_count", 0) for r in db_results.values())
+                    }
                 else:
                     self.logger.error("❌ Database connection failed")
                     db_result = {"success": False, "error": "Database connection failed"}
             else:
                 self.logger.info("ℹ️ No DATABASE_URL set, skipping database storage")
+                db_result = None
             
             total_time = round(time.time() - start_time, 2)
             
             result = {
                 'success': True,
-                'keywords_count': len(keywords),
-                'keywords_sample': keywords[:10],
+                'keywords_count': total_keywords,
+                'keywords_sample': all_keywords_sample[:10],
+                'sources': {source: len(keywords) for source, keywords in keyword_sources.items()},
                 'execution_time': total_time,
                 'fetch_time': fetch_time,
                 'timestamp': datetime.now().isoformat()
